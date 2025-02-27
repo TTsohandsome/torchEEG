@@ -3,6 +3,12 @@ import numpy as np
 import scipy.io as sio
 from scipy.signal import firwin, filtfilt
 import matplotlib.pyplot as plt
+import os.path as osp
+
+import CSP_LDA
+import FBCSP_SVM
+import TSLDA_DGFMDM
+import TWFB_DGFMDM
 
 # 初始化数据结构
 Acc = []
@@ -35,15 +41,25 @@ for i in range(49, 51):  # 原始MATLAB代码的49:50对应Python的range(49,51)
         print(f'Loading file: {file_path}')
         
         # 加载MAT文件
-        mat_data = sio.loadmat(file_path, struct_as_record=False)['eeg']
-        
+        data = sio.loadmat(file_path)['eeg']
+
         # 数据预处理
-        eeg_data = mat_data.rawdata
-        labels = mat_data.label
+        eeg_data = data['rawdata'][0, 0]
+        labels = data['label'][0, 0]
+        print(f'rawdata: {eeg_data.shape, labels.shape}')
+        
         eeg_data = np.transpose(eeg_data, (0, 2, 1))  # 置换维度
+        print(f'after transpose: {eeg_data.shape}')
         
         # 数据重塑
-        processed_data = np.vstack([np.squeeze(eeg_data[t, ...]) for t in range(eeg_data.shape[0])])
+        # processed_data = np.vstack([np.squeeze(eeg_data[t, ...]) for t in range(eeg_data.shape[0])])
+
+        # 降维
+        # 提取单层数据并压缩冗余维度（类似 MATLAB squeeze）
+        single_trial = eeg_data[0, :, :].squeeze()  # 结果形状 (4000, 33)
+        # 合并所有试验数据为二维矩阵（垂直拼接）
+        data = np.concatenate([eeg_data[i].squeeze() for i in range(40)], axis=0)  # 结果形状 (160000, 33)
+        print(f'data_type: {data.shape}')
 
         # 算法参数
         Fs = 500
@@ -51,10 +67,10 @@ for i in range(49, 51):  # 原始MATLAB代码的49:50对应Python的range(49,51)
         UpFreq = 30
 
         # 调用分类算法（需要自行实现以下函数）
-        acc0, left_num0, right_num0 = CSP_LDA(processed_data, labels, Fs, LowFreq, UpFreq)
-        acc1, left_num1, right_num1 = FBCSP_SVM(processed_data, labels, Fs, LowFreq, UpFreq)
-        acc2, left_num2, right_num2 = TSLDA_DGFMDM(processed_data, labels, Fs, LowFreq, UpFreq)
-        acc3, left_num3, right_num3 = TWFB_DGFMDM(processed_data, labels, Fs, LowFreq, UpFreq)
+        acc0, left_num0, right_num0 = CSP_LDA.CSP_LDA(data, labels, Fs, LowFreq, UpFreq)
+        # acc1, left_num1, right_num1 = FBCSP_SVM.FBCSP_SVM(data, labels, Fs, LowFreq, UpFreq)
+        # acc2, left_num2, right_num2 = TSLDA_DGFMDM.TSLDA_DGFMDM(data, labels, Fs, LowFreq, UpFreq)
+        # acc3, left_num3, right_num3 = TWFB_DGFMDM.TWFB_DGFMDM(data, labels, Fs, LowFreq, UpFreq)
 
     # 结果统计
     Acc.append([np.mean(res) for res in acc_results])
@@ -72,11 +88,10 @@ for i in range(49, 51):  # 原始MATLAB代码的49:50对应Python的range(49,51)
 
     # 调试信息
     print(f'Acc0: {np.mean(acc0):.2f}')
-    print(f'Acc1: {np.mean(acc1):.2f}')
-    print(f'Acc2: {np.mean(acc2):.2f}')
-    print(f'Acc3: {np.mean(acc3):.2f}')
+    # print(f'Acc1: {np.mean(acc1):.2f}')
+    # print(f'Acc2: {np.mean(acc2):.2f}')
+    # print(f'Acc3: {np.mean(acc3):.2f}')
 
-end
 
 # 确保数组大小不小于4
 def pad_matrix(mat, target_rows=4):
@@ -147,7 +162,7 @@ for i in range(4):
     TP = min(row_sum_R, col_sum_L)
     FP = row_sum_R - TP
     FN = col_sum_L - TP
-    TN = col_sum_AR - FP
+    TN = row_sum_AR - FP
     
     CM.append([[TP, FP], [FN, TN]])
 
