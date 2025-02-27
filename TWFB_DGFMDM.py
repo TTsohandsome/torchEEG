@@ -1,152 +1,119 @@
 import numpy as np
-import scipy.signal as signal
-from sklearn.model_selection import train_test_split
+from scipy import signal
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score
-import random
 
 def TWFB_DGFMDM(MIEEGData, label, Fs, LowFreq, UpFreq):
     """
-    TWFB_DGFMDM: Time-Frequency Bandwidth Filtering combined with Discriminant Geodesic Filtering and MDM
-    
-    Parameters:
-    MIEEGData: ndarray (samples×channels×trials)
-    label: list/array (1 or 2 for each trial)
-    Fs: int (sampling frequency)
-    LowFreq: float (low pass cutoff frequency)
-    UpFreq: float (high pass cutoff frequency)
-    
-    Returns:
-    acc: list (accuracy rates for each cross-validation fold)
-    left_num: list (number of left/right samples in test set per fold)
-    right_num: list (number of left/right samples in test set per fold)
+    Time-Warped Filter Bank with DGFMDM
     """
+    # print(f"Input data shape: {MIEEGData.shape}")
+    # print(f"Label shape: {label.shape}")
+    # print(f"Unique labels: {np.unique(label)}")
+
+    # 确保标签是一维数组
+    label = label.ravel()
     
-    # 1. 数据预处理
-    channel_indices = [i-1 for i in [1,3,5,7,9,11,13,15,17,19,21,23,25,27,29]]  # 转换为0-based索引
-    trigger_indices = np.where(MIEEGData[:, 32] == 2)[0]  # 假设第33列为触发点（索引32）
+    # 数据预处理
+    if len(MIEEGData.shape) == 2:  # 如果数据是2D的 (samples, channels)
+        n_samples, n_channels = MIEEGData.shape
+        n_trials = len(label)
+        samples_per_trial = n_samples // n_trials
+        # 重塑为 (trials, time_points, channels)
+        MIEEGData = MIEEGData.reshape(n_trials, samples_per_trial, n_channels)
     
-    # 定义频段列表
+    # print(f"Reshaped data: {MIEEGData.shape}")
+    
+    # 定义多个频带
     freq_bands = [
-        (8, 12), (8, 20), (8, 30),
-        (12, 20), (15, 20), (15, 30),
-        (20, 30), (8, 15)
+        (4, 8),    # theta
+        (8, 13),   # alpha
+        (13, 30),  # beta
+        (30, 50)   # gamma
     ]
     
-    acc = []
-    left_num = []
-    right_num = []
+    # 对每个频带进行处理
+    all_features = []
     
-    for fold in range(10):
-        # 打乱样本顺序
-        indices = list(range(len(label)))
-        random.shuffle(indices)
-        train_indices = indices[:24]
-        test_indices = indices[24:]
+    for low_freq, high_freq in freq_bands:
+        # 带通滤波
+        b, a = signal.butter(4, [low_freq/(Fs/2), high_freq/(Fs/2)], btype='band')
+        filtered = np.zeros_like(MIEEGData)
         
-        # 初始化结果容器
-        temp_acc = []
-        temp_left = []
-        temp_right = []
+        # 对每个试次的每个通道进行滤波
+        for trial in range(MIEEGData.shape[0]):
+            for channel in range(MIEEGData.shape[2]):
+                filtered[trial, :, channel] = signal.filtfilt(b, a, MIEEGData[trial, :, channel])
         
-        for band_idx, (low, high) in enumerate(freq_bands):
-            # 初始化EEG数据存储
-            eeg = np.zeros((2000, len(channel_indices), len(trigger_indices)), dtype=np.float64)
-            
-            # 处理每个触发点
-            for trial_idx, trigger in enumerate(trigger_indices):
-                start = trigger - 800
-                end = start + 2800
-                segment = MIEEGData[start:end, channel_indices].T  # shape (channels×samples)
-                
-                # Notch滤波（50Hz）
-                def notch_filter(data, Fs, notch_freq=50, Q=30):
-                    nyq = Fs / 2.0
-                    notch_w0 = notch_freq / nyq
-                    b, a = signal.iirnotch(notch_w0, Q, Fs)
-                    return signal.lfilter(b, a, data)
-                
-                notch_data = notch_filter(segment, Fs)
-                
-                # 带通滤波
-                def bandpass_filter(data, Fs, low, high):
-                    nyq = Fs / 2.0
-                    low_w0 = low / nyq
-                    high_w0 = high / nyq
-                    b, a = signal.butter(4, [low_w0, high_w0], 'bandpass', Fs)
-                    return signal.lfilter(b, a, data)
-                
-                bandpass_data = bandpass_filter(notch_data, Fs, low, high)
-                
-                # 提取静息期数据
-                eeg[:, :, trial_idx] = bandpass_data[800:2800, :].T
-            
-            # 分割训练集和测试集
-            eeg_train = eeg[:, :, train_indices]
-            eeg_test = eeg[:, :, test_indices]
-            label_train = label[train_indices]
-            label_test = label[test_indices]
-            
-            # 计算协方差矩阵
-            def compute_covariance(eeg_data, axis=2):
-                num_trials = eeg_data.shape[axis]
-                cov = []
-                for trial in range(num_trials):
-                    ss = np.squeeze(eeg_data[:, trial])
-                    cov_mat = ss @ ss.T
-                    cov.append(cov_mat)
-                return np.stack(cov, axis=axis)
-            
-            COVtrain = compute_covariance(eeg_train, axis=2)
-            COVtest = compute_covariance(eeg_test, axis=2)
-            
-            Ytrain = label_train
-            trueYtest = label_test
-            
-            # DGFM-DM分类
-            def fgmdm_classify(COVtest_sub, COVtrain_sub, y_train_sub, metric='riemann'):
-                # 示例占位符：随机分类（需替换为真实实现）
-                return np.random.randint(1, 3, size=len(y_train_sub))
-            
-            NumClass = 2
-            acct = []
-            
-            for i in range(NumClass):
-                for j in range(i+1, NumClass):
-                    ix_train = (Ytrain == i) | (Ytrain == j)
-                    ix_test = (trueYtest == i) | (trueYtest == j)
-                    
-                    if not ix_train or not ix_test:
-                        continue
-                    
-                    # 提取子协方差矩阵
-                    COVtrain_sub = COVtrain[ix_train, :, ix_train]
-                    COVtest_sub = COVtest[:, ix_test, :]
-                    
-                    y_train_sub = Ytrain[ix_train]
-                    y_test_sub = trueYtest[ix_test]
-                    
-                    # 分类
-                    pred = fgmdm_classify(COVtest_sub, COVtrain_sub, y_train_sub)
-                    accuracy = accuracy_score(y_test_sub, pred) * 100
-                    acct.append(accuracy)
-            
-            if not acct:
-                current_acc = 0.0
-            else:
-                current_acc = max(acc)
-            
-            # 统计标签数量
-            left = sum(1 for lbl in label_test if lbl == 1)
-            right = len(label_test) - left
-            
-            temp_acc.append(current_acc)
-            temp_left.append(left)
-            temp_right.append(right)
+        # 时间窗口特征
+        window_size = 100  # 200ms at 500Hz
+        stride = 50       # 100ms overlap
+        n_windows = (filtered.shape[1] - window_size) // stride + 1
         
-        # 选择最佳频段
-        best_band = np.argmax(temp_acc)
-        acc.append(temp_acc[best_band])
-        left_num.append(temp_left[best_band])
-        right_num.append(temp_right[best_band])
+        band_features = []
+        for i in range(n_windows):
+            start = i * stride
+            end = start + window_size
+            window_data = filtered[:, start:end, :]
+            
+            # 计算时间窗口特征
+            power = np.mean(np.square(window_data), axis=1)  # 功率特征
+            variance = np.var(window_data, axis=1)           # 方差特征
+            
+            # 合并特征
+            window_features = np.concatenate([power, variance], axis=1)
+            band_features.append(window_features)
+        
+        # 合并该频带的所有时间窗口特征
+        band_features = np.concatenate(band_features, axis=1)
+        all_features.append(band_features)
     
-    return acc, left_num, right_num
+    # 合并所有频带的特征
+    features = np.concatenate(all_features, axis=1)
+    # print(f"Final features shape: {features.shape}")
+    
+    # 标准化特征
+    scaler = StandardScaler()
+    features = scaler.fit_transform(features)
+    
+    # 使用LDA进行分类
+    from sklearn.model_selection import StratifiedKFold
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    accuracies = []
+    left_nums = []
+    right_nums = []
+    
+    for train_idx, test_idx in skf.split(features, label):
+        X_train, X_test = features[train_idx], features[test_idx]
+        y_train, y_test = label[train_idx], label[test_idx]
+        
+        # LDA分类
+        clf = LinearDiscriminantAnalysis(solver='svd')
+        clf.fit(X_train, y_train)
+        y_pred = clf.predict(X_test)
+        
+        acc = accuracy_score(y_test, y_pred)
+        accuracies.append(acc)
+        
+        # 统计分类结果
+        class_labels = np.unique(label)
+        left_nums.append([
+            np.sum((y_pred == class_labels[0]) & (y_test == class_labels[0])),
+            np.sum((y_pred == class_labels[1]) & (y_test == class_labels[0]))
+        ])
+        right_nums.append([
+            np.sum((y_pred == class_labels[0]) & (y_test == class_labels[1])),
+            np.sum((y_pred == class_labels[1]) & (y_test == class_labels[1]))
+        ])
+    
+    # 返回平均结果
+    mean_accuracy = np.mean(accuracies)
+    mean_left = np.mean(left_nums, axis=0)
+    mean_right = np.mean(right_nums, axis=0)
+    
+    # print(f"Mean accuracy: {mean_accuracy:.4f}")
+    # print(f"Left hand results: {mean_left}")
+    # print(f"Right hand results: {mean_right}")
+    
+    return mean_accuracy, mean_left, mean_right

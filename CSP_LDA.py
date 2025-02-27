@@ -8,112 +8,128 @@ import random
 def CSP_LDA(MIEEGData, label, Fs, LowFreq, UpFreq):
     """
     Common Spatial Pattern + Linear Discriminant Analysis for Motor Imagery Classification
-    
-    Parameters:
-    MIEEGData: ndarray (samples×channels×trials)
-    label: list/array (1 or 2 for each trial)
-    Fs: int (sampling frequency)
-    LowFreq: float (low pass cutoff frequency)
-    UpFreq: float (high pass cutoff frequency)
-    
-    Returns:
-    acc: list (accuracy rates for each cross-validation fold)
-    left_num: list (number of left/right samples in test set per fold)
-    right_num: list (number of left/right samples in test set per fold)
     """
+    # print(f"Input data shape: {MIEEGData.shape}")
+    # print(f"Label shape: {label.shape}")
+    # print(f"Unique labels: {np.unique(label)}")
+
+    # 确保标签是一维数组
+    label = label.ravel()
     
-    # 1. 数据预处理
-    channel_indices = list(range(0, 17)) + list(range(18, 30))  # 对应 MATLAB 的 [1:17 19:30]
-    trigger_indices = np.where(MIEEGData[:, 32] == 2)[0]  # 假设第33列是触发点（索引32）
-    print(len(channel_indices), len(trigger_indices))
+    # 数据预处理
+    if len(MIEEGData.shape) == 2:  # 如果数据是2D的 (samples, channels)
+        n_samples, n_channels = MIEEGData.shape
+        n_trials = len(label)
+        samples_per_trial = n_samples // n_trials
+        # 重塑为 (trials, time_points, channels)
+        MIEEGData = MIEEGData.reshape(n_trials, samples_per_trial, n_channels)
     
-    eeg = np.zeros((2000, len(channel_indices), len(trigger_indices)), dtype=np.float64)
+    # print(f"Reshaped data: {MIEEGData.shape}")
     
-    for trial_idx, trigger in enumerate(trigger_indices):
-        start = trigger - 800
-        end = start + 2800
-        segment = MIEEGData[start:end, channel_indices].T  # shape (channels×samples)
-        
-        # Notch滤波（50Hz）
-        def notch_filter(data, Fs, notch_freq=50, Q=30):
-            nyq = Fs / 2.0
-            notch_w0 = notch_freq / nyq
-            b, a = signal.iirnotch(notch_w0, Q, Fs)
-            return signal.lfilter(b, a, data)
-        
-        notch_data = notch_filter(segment, Fs)
-        
-        # 带通滤波
-        def bandpass_filter(data, Fs, low, high):
-            nyq = Fs / 2.0
-            low_w0 = low / nyq
-            high_w0 = high / nyq
-            b, a = signal.butter(4, [low_w0, high_w0], 'bandpass', Fs)
-            return signal.lfilter(b, a, data)
-        
-        bandpass_data = bandpass_filter(notch_data, Fs, LowFreq, UpFreq)
-        
-        # 提取801-2800样本（静息期）
-        eeg[:, :, trial_idx] = bandpass_data[800:2800, :].T
+    # 带通滤波
+    def bandpass_filter(data, Fs, low, high):
+        nyq = Fs / 2.0
+        low_w0 = low / nyq
+        high_w0 = high / nyq
+        b, a = signal.butter(4, [low_w0, high_w0], 'bandpass')
+        filtered = np.zeros_like(data)
+        # 对每个试次的每个通道进行滤波
+        for trial in range(data.shape[0]):
+            for channel in range(data.shape[2]):
+                filtered[trial, :, channel] = signal.filtfilt(b, a, data[trial, :, channel])
+        return filtered
     
-    # 3. 交叉验证
-    acc = []
-    left_num = []
-    right_num = []
+    # 应用滤波
+    filtered_data = bandpass_filter(MIEEGData, Fs, LowFreq, UpFreq)
+    # print(f"Filtered data shape: {filtered_data.shape}")
     
-    for fold in range(10):
-        # 打乱样本顺序
-        indices = list(range(len(label)))
-        random.shuffle(indices)
-        train_indices = indices[:24]
-        test_indices = indices[24:]
-        
-        eeg_train = eeg[:, :, train_indices]
-        eeg_test = eeg[:, :, test_indices]
-        label_train = label[train_indices]
-        label_test = label[test_indices]
-        
-        # CSP特征提取
-        def compute_csp(eeg_train, label_train, n_components=2):
-            # 计算类协方差矩阵
-            class1 = eeg_train[label_train == 1]
-            class2 = eeg_train[label_train == 2]
-            
-            cov1 = np.cov(class1, rowvar=False)
-            cov2 = np.cov(class2, rowvar=False)
-            
-            # 计算总协方差矩阵
-            cov_total = (len(class1)*cov1 + len(class2)*cov2) / (len(class1) + len(class2))
-            
-            # 计算特征值和特征向量
-            eig_vals, eig_vecs = np.linalg.eigh(cov_total, cov1)
-            
-            # 选择前n_components个特征向量
-            csp_matrix = eig_vecs[:, ::-1][:, :n_components]
-            
-            # 投影数据
-            projected_train = np.dot(eeg_train, csp_matrix.T)
-            
-            return projected_train, csp_matrix
-        
-        train_feature, csp_matrix = compute_csp(eeg_train, label_train, n_components=2)
-        
-        # 对测试数据应用CSP投影
-        test_feature = np.dot(eeg_test, csp_matrix.T)[:2, :]  # 取前2个特征
-        
-        # LDA分类
-        lda = LinearDiscriminantAnalysis()
-        lda.fit(train_feature, label_train)
-        predictions = lda.predict(test_feature)
-        
-        # 计算准确率
-        accuracy = accuracy_score(label_test, predictions) * 100
-        acc.append(accuracy)
-        
-        # 统计左右样本数量
-        left = sum(1 for lbl in label_test if lbl == 1)
-        right = len(label_test) - left
-        left_num.append(left)
-        right_num.append(right)
+    # 计算每个试次的协方差矩阵
+    def compute_covariance(trial_data):
+        # trial_data shape: (time_points, channels)
+        return np.cov(trial_data, rowvar=False)
     
-    return acc, left_num, right_num
+    covs = np.array([compute_covariance(trial) for trial in filtered_data])
+    # print(f"Covariance matrices shape: {covs.shape}")
+    
+    # 分离类别
+    # print(f"Computing class-wise covariance matrices for labels: {np.unique(label)}")
+    covs_class1 = covs[label == np.unique(label)[0]]
+    covs_class2 = covs[label == np.unique(label)[1]]
+    # print(f"Class 1 covs shape: {covs_class1.shape}")
+    # print(f"Class 2 covs shape: {covs_class2.shape}")
+    
+    # 计算平均协方差矩阵
+    mean_cov1 = np.mean(covs_class1, axis=0)
+    mean_cov2 = np.mean(covs_class2, axis=0)
+    
+    # CSP变换矩阵计算
+    composite_cov = mean_cov1 + mean_cov2
+    eigenvals, eigenvects = np.linalg.eigh(composite_cov)
+    
+    # 确保特征值为正
+    eigenvals = np.maximum(eigenvals, 1e-10)
+    
+    # 白化变换
+    whitening = np.dot(np.diag(np.power(eigenvals, -0.5)), eigenvects.T)
+    transformed_cov1 = np.dot(np.dot(whitening, mean_cov1), whitening.T)
+    
+    # CSP投影矩阵
+    eigenvals_csp, eigenvects_csp = np.linalg.eigh(transformed_cov1)
+    csp_matrix = np.dot(eigenvects_csp.T, whitening)
+    
+    # 选择最显著的特征
+    n_components = min(4, csp_matrix.shape[0])  # 确保不超过可用的特征数
+    spatial_filters = np.vstack([
+        csp_matrix[:n_components//2],
+        csp_matrix[-n_components//2:]
+    ])
+    
+    # 特征提取
+    features = np.zeros((filtered_data.shape[0], n_components))
+    for i, trial in enumerate(filtered_data):
+        projected = np.dot(spatial_filters, trial.T)
+        features[i] = np.log(np.var(projected, axis=1))
+    
+    # print(f"Final features shape: {features.shape}")
+    
+    # 使用交叉验证
+    from sklearn.model_selection import StratifiedKFold
+    
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    accuracies = []
+    left_nums = []
+    right_nums = []
+    
+    for train_idx, test_idx in skf.split(features, label):
+        X_train, X_test = features[train_idx], features[test_idx]
+        y_train, y_test = label[train_idx], label[test_idx]
+        
+        clf = LinearDiscriminantAnalysis()
+        clf.fit(X_train, y_train)
+        y_pred = clf.predict(X_test)
+        
+        acc = accuracy_score(y_test, y_pred)
+        accuracies.append(acc)
+        
+        # 统计分类结果
+        class_labels = np.unique(label)
+        left_nums.append([
+            np.sum((y_pred == class_labels[0]) & (y_test == class_labels[0])),
+            np.sum((y_pred == class_labels[1]) & (y_test == class_labels[0]))
+        ])
+        right_nums.append([
+            np.sum((y_pred == class_labels[0]) & (y_test == class_labels[1])),
+            np.sum((y_pred == class_labels[1]) & (y_test == class_labels[1]))
+        ])
+    
+    # 修改返回值的格式
+    mean_accuracy = np.mean(accuracies)
+    mean_left = np.mean(left_nums, axis=0)  # 确保是一维数组 [correct, incorrect]
+    mean_right = np.mean(right_nums, axis=0)  # 确保是一维数组 [correct, incorrect]
+    
+    # 打印调试信息
+    # print(f"Mean accuracy: {mean_accuracy:.4f}")
+    # print(f"Left hand results: {mean_left}")
+    # print(f"Right hand results: {mean_right}")
+    
+    return mean_accuracy, mean_left, mean_right

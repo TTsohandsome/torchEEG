@@ -1,190 +1,133 @@
 import numpy as np
-import scipy.signal as signal
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from scipy import signal
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
-import random
+from sklearn.metrics import accuracy_score
 
 def FBCSP_SVM(MIEEGData, label, Fs, LowFreq, UpFreq):
     """
-    Filter Bank Common Spatial Pattern + Support Vector Machine for Motor Imagery Classification
-    
-    Parameters:
-    MIEEGData: ndarray (samples×channels×trials)
-    label: list/array (1 or 2 for each trial)
-    Fs: int (sampling frequency)
-    LowFreq: float (low pass cutoff frequency)
-    UpFreq: float (high pass cutoff frequency)
-    
-    Returns:
-    acc: list (accuracy rates for each cross-validation fold)
-    left_num: list (number of left/right samples in test set per fold)
-    right_num: list (number of left/right samples in test set per fold)
+    Filter Bank Common Spatial Pattern + Support Vector Machine
     """
+    # print(f"Input data shape: {MIEEGData.shape}")
+    # print(f"Label shape: {label.shape}")
+    # print(f"Unique labels: {np.unique(label)}")
+
+    # 确保标签是一维数组
+    label = label.ravel()
     
-    # 1. 数据预处理
-    channel_indices = [i-1 for i in [1,3,5,7,9,11,13,15,17,19,21,23,25,27,29]]  # 转换为0-based索引
-    trigger_indices = np.where(MIEEGData[:, 32] == 2)[0]  # 假设第33列为触发点（索引32）
+    # 数据预处理
+    if len(MIEEGData.shape) == 2:  # 如果数据是2D的 (samples, channels)
+        n_samples, n_channels = MIEEGData.shape
+        n_trials = len(label)
+        samples_per_trial = n_samples // n_trials
+        # 重塑为 (trials, time_points, channels)
+        MIEEGData = MIEEGData.reshape(n_trials, samples_per_trial, n_channels)
     
-    eeg = np.zeros((2000, len(channel_indices), len(trigger_indices)), dtype=np.float64)
+    # print(f"Reshaped data: {MIEEGData.shape}")
     
-    for trial_idx, trigger in enumerate(trigger_indices):
-        start = trigger - 800
-        end = start + 2800
-        segment = MIEEGData[start:end, channel_indices].T  # shape (channels×samples)
-        
-        # Notch滤波（50Hz）
-        def notch_filter(data, Fs, notch_freq=50, Q=30):
-            nyq = Fs / 2.0
-            notch_w0 = notch_freq / nyq
-            b, a = signal.iirnotch(notch_w0, Q, Fs)
-            return signal.lfilter(b, a, data)
-        
-        notch_data = notch_filter(segment, Fs)
-        
+    # 定义频带
+    freq_bands = [(4, 8), (8, 12), (12, 16), (16, 20), (20, 24), (24, 28)]
+    
+    # 对每个频带进行滤波和特征提取
+    all_features = []
+    
+    for low, high in freq_bands:
         # 带通滤波
-        def bandpass_filter(data, Fs, low, high):
-            nyq = Fs / 2.0
-            low_w0 = low / nyq
-            high_w0 = high / nyq
-            b, a = signal.butter(4, [low_w0, high_w0], 'bandpass', Fs)
-            return signal.lfilter(b, a, data)
+        b, a = signal.butter(4, [low/(Fs/2), high/(Fs/2)], btype='band')
+        filtered = np.zeros_like(MIEEGData)
         
-        bandpass_data = bandpass_filter(notch_data, Fs, LowFreq, UpFreq)
+        # 对每个试次的每个通道进行滤波
+        for trial in range(MIEEGData.shape[0]):
+            for channel in range(MIEEGData.shape[2]):
+                filtered[trial, :, channel] = signal.filtfilt(b, a, MIEEGData[trial, :, channel])
         
-        # 提取801-2800样本（静息期）
-        eeg[:, :, trial_idx] = bandpass_data[800:2800, :].T
+        # 计算每个试次的协方差矩阵
+        covs = np.array([np.cov(trial.T) for trial in filtered])
+        
+        # 分离类别
+        covs_class1 = covs[label == np.unique(label)[0]]
+        covs_class2 = covs[label == np.unique(label)[1]]
+        
+        # 计算平均协方差矩阵
+        mean_cov1 = np.mean(covs_class1, axis=0)
+        mean_cov2 = np.mean(covs_class2, axis=0)
+        
+        # CSP变换矩阵计算
+        composite_cov = mean_cov1 + mean_cov2
+        eigenvals, eigenvects = np.linalg.eigh(composite_cov)
+        
+        # 确保特征值为正
+        eigenvals = np.maximum(eigenvals, 1e-10)
+        
+        # 白化变换
+        whitening = np.dot(np.diag(np.power(eigenvals, -0.5)), eigenvects.T)
+        transformed_cov1 = np.dot(np.dot(whitening, mean_cov1), whitening.T)
+        
+        # CSP投影矩阵
+        eigenvals_csp, eigenvects_csp = np.linalg.eigh(transformed_cov1)
+        csp_matrix = np.dot(eigenvects_csp.T, whitening)
+        
+        # 选择最显著的特征
+        n_components = min(4, csp_matrix.shape[0])
+        spatial_filters = np.vstack([
+            csp_matrix[:n_components//2],
+            csp_matrix[-n_components//2:]
+        ])
+        
+        # 特征提取
+        band_features = np.zeros((filtered.shape[0], n_components))
+        for i, trial in enumerate(filtered):
+            projected = np.dot(spatial_filters, trial.T)
+            band_features[i] = np.log(np.var(projected, axis=1))
+        
+        all_features.append(band_features)
     
-    # 3. 交叉验证
-    acc = []
-    left_num = []
-    right_num = []
+    # 合并所有频带的特征
+    features = np.hstack(all_features)
+    # print(f"Final features shape: {features.shape}")
     
-    for fold in range(10):
-        # 打乱样本顺序
-        indices = list(range(len(label)))
-        random.shuffle(indices)
-        train_indices = indices[:24]
-        test_indices = indices[24:]
-        
-        eeg_train = eeg[:, :, train_indices]
-        eeg_test = eeg[:, :, test_indices]
-        label_train = label[train_indices]
-        label_test = label[test_indices]
-        
-        # FBCSP参数设置
-        freq_bands = [(10, 13), (13, 16), (16, 19), (19, 22), (22, 25)]  # 频率带
-        csp_para = 2  # CSP组件数
-        filter_order = 4  # 滤波器阶数
-        
-        # FBCSP特征提取函数
-        def compute_fbcsp(eeg_train, label_train, csp_para, freq_bands, Fs, filter_order):
-            num_bands = len(freq_bands)
-            num_channels = eeg_train.shape[0]
-            num_trials = eeg_train.shape[2]
-            
-            # 初始化特征矩阵
-            feature_matrix = []
-            
-            for band in freq_bands:
-                low, high = band
-                
-                # 设计带通滤波器
-                def design_bandpass(low, high, Fs, order=4):
-                    nyq = Fs / 2.0
-                    low_w0 = low / nyq
-                    high_w0 = high / nyq
-                    b, a = signal.butter(order, [low_w0, high_w0], 'bandpass', Fs)
-                    return b, a
-                
-                b, a = design_bandpass(low, high, Fs, filter_order)
-                
-                # 对每个试验应用滤波器
-                band_eeg = []
-                for trial in range(num_trials):
-                    trial_data = eeg_train[:, trial]
-                    filtered = signal.lfilter(b, a, trial_data)
-                    band_eeg.append(filtered)
-                band_eeg = np.array(band_eeg).T  # shape (samples×channels×num_trials)
-                
-                # 计算CSP
-                def compute_csp(band_eeg, label_train, n_components=2):
-                    class1 = band_eeg[label_train == 1]
-                    class2 = band_eeg[label_train == 2]
-                    
-                    cov1 = np.cov(class1, rowvar=False)
-                    cov2 = np.cov(class2, rowvar=False)
-                    
-                    # 总协方差矩阵
-                    total_samples = len(class1) + len(class2)
-                    cov_total = (len(class1)*cov1 + len(class2)*cov2) / total_samples
-                    
-                    # 特征值分解
-                    eig_vals, eig_vecs = np.linalg.eigh(cov_total, cov1)
-                    
-                    # 选择特征向量
-                    csp_matrix = eig_vecs[:, ::-1][:, :n_components]
-                    
-                    # 投影数据
-                    projected = np.dot(band_eeg, csp_matrix.T)
-                    return projected, csp_matrix
-                
-                trial_features, csp_matrix = compute_csp(band_eeg, label_train, csp_para)
-                feature_matrix.append(trial_features)
-            
-            # 拼接所有频率带的特征
-            full_feature = np.hstack(feature_matrix)
-            return full_feature, csp_matrix
-        
-        # 训练FBCSP
-        train_feature, fbcsp_w = compute_fbcsp(eeg_train, label_train, csp_para, freq_bands, Fs, filter_order)
-        
-        # 测试数据投影
-        test_feature = []
-        for band in freq_bands:
-            low, high = band
-            
-            # 设计带通滤波器
-            b, a = signal.butter(4, [low, high], 'bandpass', Fs)
-            
-            # 对测试数据应用滤波器
-            band_test = []
-            for trial in range(eeg_test.shape[2]):
-                trial_data = eeg_test[:, trial]
-                filtered = signal.lfilter(b, a, trial_data)
-                band_test.append(filtered)
-            band_test = np.array(band_test).T
-            
-            # 应用CSP矩阵投影
-            band_proj = np.dot(band_test, fbcsp_w)
-            test_feature.append(band_proj)
-        
-        test_feature = np.hstack(test_feature)[:csp_para * num_bands, :]  # 根据CSP组件数截取
-        
-        # SVM分类
-        # 使用标准化提高SVM性能
-        scaler = StandardScaler()
-        scaler.fit(train_feature)
-        train_scaled = scaler.transform(train_feature)
-        test_scaled = scaler.transform(test_feature)
-        
-        # 训练SVM
-        svm = SVC(kernel='linear', C=1.0, probability=True)
-        svm.fit(train_scaled, label_train)
-        
-        # 预测
-        test_label = svm.predict(test_scaled)
-        
-        # 计算准确率
-        accuracy = accuracy_score(label_test, test_label) * 100
-        acc.append(accuracy)
-        
-        # 统计左右样本数量
-        left = sum(1 for lbl in label_test if lbl == 1)
-        right = len(label_test) - left
-        left_num.append(left)
-        right_num.append(right)
+    # 标准化特征
+    scaler = StandardScaler()
+    features = scaler.fit_transform(features)
     
-    return acc, left_num, right_num
+    # SVM分类
+    clf = SVC(kernel='rbf', random_state=42)
+    
+    # 使用交叉验证
+    from sklearn.model_selection import StratifiedKFold
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    accuracies = []
+    left_nums = []
+    right_nums = []
+    
+    for train_idx, test_idx in skf.split(features, label):
+        X_train, X_test = features[train_idx], features[test_idx]
+        y_train, y_test = label[train_idx], label[test_idx]
+        
+        clf.fit(X_train, y_train)
+        y_pred = clf.predict(X_test)
+        
+        acc = accuracy_score(y_test, y_pred)
+        accuracies.append(acc)
+        
+        # 统计分类结果
+        class_labels = np.unique(label)
+        left_nums.append([
+            np.sum((y_pred == class_labels[0]) & (y_test == class_labels[0])),
+            np.sum((y_pred == class_labels[1]) & (y_test == class_labels[0]))
+        ])
+        right_nums.append([
+            np.sum((y_pred == class_labels[0]) & (y_test == class_labels[1])),
+            np.sum((y_pred == class_labels[1]) & (y_test == class_labels[1]))
+        ])
+    
+    # 返回平均结果
+    mean_accuracy = np.mean(accuracies)
+    mean_left = np.mean(left_nums, axis=0)
+    mean_right = np.mean(right_nums, axis=0)
+    
+    # print(f"Mean accuracy: {mean_accuracy:.4f}")
+    # print(f"Left hand results: {mean_left}")
+    # print(f"Right hand results: {mean_right}")
+    
+    return mean_accuracy, mean_left, mean_right
