@@ -303,4 +303,4 @@ for idx, vis_data in enumerate(visualization_data):
     grid.plot_topographic_map(vis_data['topo_features'])
 
 # 保存结果到本地
-sio.savemat('FeatureData2.mat', {'data': data})
+sio.savemat('FeatureData_cnn1.mat', {'data': data})
